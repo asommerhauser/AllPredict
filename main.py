@@ -2,15 +2,30 @@ import os
 import csv
 import tensorflow as tf
 import numpy as np
-from keras.layers import LSTM, Dense, Input
+from keras.layers import LSTM, Dense, Input, Embedding
 from keras.models import Model
 from keras.utils import pad_sequences
 
-input_vocab = {}
-output_vocab = {}
+#player_vocab is a dictionary that holds numbered keys each representing an individual player
+player_vocab = {0: 'start', 1: 'end', 2: 'null'}
+players_reversed = {'start': 0, 'end': 1, 'null': 2}
+#rosters is a dictionary that holds each unique unordered combination of players together on a roster and pairs them with an int
+rosters = {}
+#token_vocab is a dictionary the holds numbered keys each corresponding to string that makes up the cell
+token_vocab = {
+    1: 'start',
+    2: 'end',
+    3: 'null',
+    4: 'cop'
+}
+#cell_vocab is a dictionary that holds numbered keys, each that represent a unique numerical value that corresponds to the cells
+cell_vocab = {}
+#season_vocab is a list that holds all the seasons that are a part of the data set and one for next season
+season_vocab = []
+reg_or_play = [0, 1]
 
 #***************** --DIAGNOSTICS-- *****************
-def testShots(parsed, game):
+'''def testShots(parsed, game):
     pointsParsed = 0
     points = 0
     for x in parsed:
@@ -31,7 +46,38 @@ def testShots(parsed, game):
     if points == pointsParsed:
         return True
     else:
-        return "POINTS ERROR"
+        return "POINTS ERROR"'''
+
+'''-------------------------------------------
+encodeListToInt function:
+this function is used to encode a list of integers into a singular integer
+input: list of integers
+output: single unique integer
+----------------------------------------------'''
+def encodeListToInt(lst):
+    prime_numbers = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]
+    result = 1
+    for i, num in enumerate(lst):
+        if i < len(prime_numbers):
+            result *= prime_numbers[i] ** num
+    return result
+
+'''----------------------------------------------
+decodeIntToList function:
+this function is used to decode a singular integer into a list of integers
+input: single unique integer
+output: list of integers
+----------------------------------------------'''
+def decodeIntToList(encoded_int):
+    prime_numbers = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]
+    decoded_list = []
+    for prime in prime_numbers:
+        count = 0
+        while encoded_int % prime == 0:
+            encoded_int //= prime
+            count += 1
+        decoded_list.append(count)
+    return decoded_list
 
 #----------------------------------------------
 #fillStep function:
@@ -42,6 +88,8 @@ def testShots(parsed, game):
 #----------------------------------------------
 def fillStep(step):
     timestep = []
+    home = []
+    away = []
     timestep.append(step['h1'])
     timestep.append(step['h2'])
     timestep.append(step['h3'])
@@ -52,8 +100,7 @@ def fillStep(step):
     timestep.append(step['a3'])
     timestep.append(step['a4'])
     timestep.append(step['a5'])
-    timestep.append(step['period'])
-    timestep.append(step['remaining_time'][-5:])
+    timestep.append(int(step['period']))
     return timestep
 
 #----------------------------------------------
@@ -64,14 +111,14 @@ def fillStep(step):
 #----------------------------------------------
 def assistStep(step):
     timestep = fillStep(step)
-    timestep.append('assist')
-    timestep.append(step['assist'])
+    after_steps = ['assist', step['assist']]
     if step['type'][:3] == '3pt':
-        timestep.append('3pt')
+        after_steps.append('3pt')
     else:
-        timestep.append('2pt')
-    timestep.append('shot')
-    return timestep
+        after_steps.append('2pt')
+    after_steps.append('shot')
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #shotStep function:
@@ -81,18 +128,18 @@ def assistStep(step):
 #----------------------------------------------
 def shotStep(step):
     timestep = fillStep(step)
-    timestep.append('shot')
-    timestep.append(step['player'])
+    after_steps = ['shot', step['player']]
     if step['type'][:3] == '3pt':
-        timestep.append('3pt')
+        after_steps.append('3pt')
     else:
-        timestep.append('2pt')
+        after_steps.append('2pt')
     # Check for shot block
     if step['block'] != '':
-        timestep.append('block')
+        after_steps.append('block')
     else:
-        timestep.append(step['result'])
-    return timestep
+        after_steps.append(step['result'])
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #assistStep function:
@@ -103,11 +150,9 @@ def shotStep(step):
 #----------------------------------------------
 def blockStep(step, next):
     timestep = fillStep(step)
-    timestep.append('block')
-    timestep.append(step['block'])
-    timestep.append('block')
-    timestep.append(next)
-    return timestep
+    after_steps = ['block', step['block'], 'block', next]
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #reboundStep function:
@@ -117,18 +162,19 @@ def blockStep(step, next):
 #----------------------------------------------
 def reboundStep(step):
     timestep = fillStep(step)
-    timestep.append('rebound')
-    if step['type'] == 'team rebound':
-        timestep.append('null')
-        timestep.append(step['type'][8:])
+    after_steps = ['rebound']
+    if step['type'] == 'team rebound' or step['player'] == '':
+        after_steps.append('null')
+        after_steps.append(step['type'][8:])
     else:
-        timestep.append(step['player'])
-        timestep.append(step['type'][8:])
+        after_steps.append(step['player'])
+        after_steps.append(step['type'][8:])
     if step['type'][8:] == 'defensive':
-        timestep.append('cop')
+        after_steps.append('cop')
     else:
-        timestep.append('null')
-    return timestep
+        after_steps.append('null')
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #freeThrowStep function:
@@ -138,11 +184,9 @@ def reboundStep(step):
 #----------------------------------------------
 def freeThrowStep(step):
     timestep = fillStep(step)
-    timestep.append('shot')
-    timestep.append(step['player'])
-    timestep.append('free throw')
-    timestep.append(step['result'])
-    return timestep
+    after_steps = ['shot', step['player'], 'free throw', step['result']]
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #stealStep function:
@@ -152,11 +196,9 @@ def freeThrowStep(step):
 #----------------------------------------------
 def stealStep(step):
     timestep = fillStep(step)
-    timestep.append('steal')
-    timestep.append(step['steal'])
-    timestep.append(step['player'])
-    timestep.append('cop')
-    return timestep
+    after_steps = ['steal', step['steal'], step['player'], 'cop']
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #turnoverStep function:
@@ -166,28 +208,29 @@ def stealStep(step):
 #----------------------------------------------
 def turnoverStep(step):
     #List of possible violations
-    checkVio = ['3-second violation', 'shot clock', '8-second violation', 'lane violation', 'offensive goaltending',
+    check_vio = ['3-second violation', 'shot clock', '8-second violation', 'lane violation', 'offensive goaltending',
                 'palming', 'backcourt', '5-second violation', 'double dribble', 'discontinue dribble', 'illegal assist',
                 'jump ball violation', 'offensive foul', 'illegal screen', 'basket from below', 'punched ball',
                 'too many players', 'traveling', 'kicked ball']
     #List of possible errors
-    checkError = ['lost ball', 'out of bounds lost ball', 'step out of bounds', 'bad pass', 'inbound']
+    check_error = ['lost ball', 'out of bounds lost ball', 'step out of bounds', 'bad pass', 'inbound']
     timestep = fillStep(step)
-    timestep.append('turnover')
+    after_steps = ['turnover']
     if step['player'] == '':
-        timestep.append('null')
+        after_steps.append('null')
     else:
-        timestep.append(step['player'])
+        after_steps.append(step['player'])
     if step['steal'] != '':
-        timestep.append('steal')
+        after_steps.append('steal')
     elif step['type'] == '':
-        timestep.append('null')
-    elif step['type'] in checkVio:
-        timestep.append('violation')
-    elif step['type'] in checkError:
-        timestep.append('error')
-    timestep.append('cop')
-    return timestep
+        after_steps.append('null')
+    elif step['type'] in check_vio:
+        after_steps.append('violation')
+    elif step['type'] in check_error:
+        after_steps.append('error')
+    after_steps.append('cop')
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #foulStep function:
@@ -197,40 +240,41 @@ def turnoverStep(step):
 #----------------------------------------------
 def foulStep(step, next):
     timestep = fillStep(step)
-    timestep.append('foul')
+    after_steps = ['foul']
     if step['event_type'] == 'foul':
         if step['player'] == '':
-            timestep.append('team')
+            after_steps.append('team')
         else:
-            timestep.append(step['player'])
+            after_steps.append(step['player'])
         if step['type'] == '':
-            timestep.append('null')
+            after_steps.append('null')
         elif step['type'][-9:] == 'technical':
-            timestep.append('technical')
+            after_steps.append('technical')
         else:
-            timestep.append(step['type'])
+            after_steps.append(step['type'])
         if next == 'ejection':
-            timestep.append('ejection')
+            after_steps.append('ejection')
         else:
-            timestep.append('foul')
+            after_steps.append('foul')
     else:
         if step['type'] == 'coach technical foul':
-            timestep.append('coach')
+            after_steps.append('coach')
         elif step['player'] == '':
-            timestep.append('null')
+            after_steps.append('null')
         else:
-            timestep.append(step['player'])
+            after_steps.append(step['player'])
         if step['type'] == 'coach technical foul':
-            timestep.append('coach technical')
+            after_steps.append('coach technical')
         elif step['type'] == 'defensive 3 seconds':
-            timestep.append('defensive 3-second')
+            after_steps.append('defensive 3-second')
         else:
-            timestep.append('double technical')
+            after_steps.append('double technical')
         if next == 'ejection':
-            timestep.append('ejection')
+            after_steps.append('ejection')
         else:
-            timestep.append('foul')
-    return timestep
+            after_steps.append('foul')
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #subStep function:
@@ -240,11 +284,9 @@ def foulStep(step, next):
 #----------------------------------------------
 def subStep(step):
     timestep = fillStep(step)
-    timestep.append('substitution')
-    timestep.append(step['entered'])
-    timestep.append(step['left'])
-    timestep.append('substitution')
-    return timestep
+    after_steps = ['substitution', step['entered'], step['left'], 'substitution']
+    full_list = timestep + after_steps
+    return full_list
 
 #----------------------------------------------
 #tensorfy function:
@@ -259,43 +301,44 @@ def subStep(step):
         count += 1
     return tf.constant(step)'''
 
-def tensorin(step):
-    count = 0
-    for x in step:
-        step[count] = encodeInput(x)
-        count += 1
-    return tf.constant(step)
-
-def tensorout(step):
-    count = 0
-    for x in step:
-        step[count] = encodeOutput(x)
-        count += 1
-    return tf.constant(step)
-
 #----------------------------------------------
 #encodeString function:
 #This function encodes strings and updates the vocab and
 #input: the string to be encoded and the dictionary of all encoded terms
 #output: dictionary of all encoded terms with one added
 #----------------------------------------------
-'''def encodeString(string):
-    if string not in vocab:
-        code = len(vocab) + 1
-        vocab[string] = code
-    return vocab[string]'''
+def encodePlayer(stri):
+    if stri not in player_vocab.values():
+        code = len(player_vocab) + 1
+        player_vocab[code] = stri
+        players_reversed[stri] = code
+        return code
+    else:
+        return players_reversed[stri]
 
-def encodeInput(string):
-    if string not in input_vocab:
-        code = len(input_vocab) + 1
-        input_vocab[string] = code
-    return input_vocab[string]
+def encodeRoster(lst):
+    num = encodeListToInt(lst)
+    if num not in rosters:
+        code = len(rosters) + 1
+        rosters[num] = code
+    return rosters[num]
 
-def encodeOutput(string):
-    if string not in output_vocab:
-        code = len(output_vocab) + 1
-        output_vocab[string] = code
-    return output_vocab[string]
+def encodeTokens(lst):
+    encoded_list = []
+    for token in lst:
+        if token not in token_vocab:
+            code = len(token_vocab) + 1
+            token_vocab[token] = code
+        encoded_list.append(token_vocab[token])
+    return encoded_list
+
+def encodeCell(lst):
+    cell_code = encodeListToInt(lst)
+    if cell_code not in cell_vocab:
+        code = len(cell_vocab) + 1
+        cell_vocab[code] = cell_code
+        cell_vocab[code] = cell_code
+    return cell_vocab[cell_code]
 
 #----------------------------------------------
 #decodeInt function:
@@ -303,11 +346,11 @@ def encodeOutput(string):
 #input: encoded int
 #output: decoded string
 #----------------------------------------------
-def decodeInt(integer):
+'''def decodeInt(integer):
     for string, value in output_vocab.items():
         if value == integer:
             return string
-    return None
+    return None'''
 
 #----------------------------------------------
 #padList function:
@@ -328,7 +371,7 @@ def decodeInt(integer):
 #input: tensor (formatted as the RNN output)
 #output: bool (true = home win, false = away win
 #----------------------------------------------
-def scoreGame(game):
+'''def scoreGame(game):
     home = 0
     away = 0
     x = 0
@@ -351,7 +394,7 @@ def scoreGame(game):
     if home > away:
         return True
     else:
-        return False
+        return False'''
 
 #----------------------------------------------
 #parseGame function:
@@ -361,105 +404,150 @@ def scoreGame(game):
 #----------------------------------------------
 def parseGame(path):
     print(path)
+    playoff = 0
+    season = 0
+    player_step = []
     timesteps = []
     steps = -1
     home = []
     away = []
-    input = []
+    #timesteps.append(['start', 'start', 'start', 'start', 'start', 'start', 'start'])
+    player_step = [encodePlayer('start')]
     #Opens the file
     with open(path) as file:
         steps += 1
         dict = csv.DictReader(file)
         data = [row for row in dict]
         count = -1
-        #input date
-        input.append(data[0]['date'][-2:])
-        input.append(data[0]['date'][5:7])
-        input.append(data[0]['date'][:4])
+        #input season
+        if int(path[21:][:2]) > 9:
+            season = int(path[16:][:4]) + 1
+        else:
+            season = int(path[16:][:4])
+        if season not in season_vocab:
+            season_vocab.append(season)
+        #input game state
+        if data[0]['data_set'][8] == 'P':
+            playoff = 1
         #input players
         for x in range(1, 6):
             string = 'h' + str(x)
-            home.append(data[0][string])
+            home.append(encodePlayer(data[0][string]))
         for x in range(1, 6):
             string = 'a' + str(x)
-            away.append(data[0][string])
+            away.append(encodePlayer(data[0][string]))
         #Loops through each event in the game
         for x in data:
             count += 1
             #EVENT CHECKING
             #shot
             if x['event_type'] == 'shot':
-                blocked = False
                 #check for if the shot was assisted
                 if x['assist'] != '':
-                    timesteps.append(assistStep(x))
+                    #timesteps.append(assistStep(x))
+                    player_step.append(encodePlayer(assistStep(x)[12]))
+                    #print(str(count) + ': ' + 'ASSIST -', player_vocab[player_step[len(player_step) - 1]])
                 #Shot information
-                timesteps.append(shotStep(x))
+                #timesteps.append(shotStep(x))
+                player_step.append(encodePlayer(shotStep(x)[12]))
+                #print(str(count) + ': ' + 'SHOT -', player_vocab[player_step[len(player_step) - 1]])
                 #Check for block
                 if x['block'] != '':
-                    blocked = True
-                #Shot block event
-                if blocked == True:
-                    timesteps.append(blockStep(x, data[count + 1]['event_type']))
+                    # timesteps.append(blockStep(x, data[count + 1]['event_type']))
+                    player_step.append(encodePlayer(blockStep(x, data[count + 1]['event_type'])[12]))
+                    #print(str(count) + ': ' + 'BLOCK -', player_vocab[player_step[len(player_step) - 1]])
             #free throw
             elif x['event_type'] == 'free throw':
-                timesteps.append(freeThrowStep(x))
+                #timesteps.append(freeThrowStep(x))
+                player_step.append(encodePlayer(freeThrowStep(x)[12]))
+                #print(str(count) + ': ' + 'FREE THROW -', player_vocab[player_step[len(player_step) - 1]])
             #rebound
             elif x['event_type'] == 'rebound':
-                timesteps.append(reboundStep(x))
+                #timesteps.append(reboundStep(x))
+                player_step.append(encodePlayer(reboundStep(x)[12]))
+                #print(str(count) + ': ' + 'REBOUND -', player_vocab[player_step[len(player_step) - 1]])
             #turnover
             elif x['event_type'] == 'turnover':
                 if x['type'] != 'no turnover':
-                    timesteps.append(turnoverStep(x))
+                    #timesteps.append(turnoverStep(x))
+                    player_step.append(encodePlayer(turnoverStep(x)[12]))
+                    #print(str(count) + ': ' + 'TURNOVER -', player_vocab[player_step[len(player_step) - 1]])
                 #check for steal
                 if x['steal'] != '':
-                    timesteps.append(stealStep(x))
+                    #timesteps.append(stealStep(x))
+                    player_step.append(encodePlayer(stealStep(x)[12]))
+                    #print(str(count) + ': ' + 'STEAL -', player_vocab[player_step[len(player_step) - 1]])
             #foul
             elif x['event_type'] == 'foul':
-                timesteps.append(foulStep(x, data[count+1]['event_type']))
+                #timesteps.append(foulStep(x, data[count+1]['event_type']))
+                player_step.append(encodePlayer(foulStep(x, data[count + 1]['event_type'])[12]))
+                #print(str(count) + ': ' + 'FOUL -', player_vocab[player_step[len(player_step) - 1]])
             elif x['event_type'] == 'technical foul':
-                timesteps.append(foulStep(x, data[count+1]['event_type']))
+                #timesteps.append(foulStep(x, data[count+1]['event_type']))
+                player_step.append(encodePlayer(foulStep(x, data[count+1]['event_type'])[12]))
+                #print(str(count) + ': ' + 'TECH -', player_vocab[player_step[len(player_step) - 1]])
             #substitution
             elif x['event_type'] == 'substitution':
-                timesteps.append(subStep(x))
+                #timesteps.append(subStep(x))
                 for y in range(1, 6):
                     string = 'h' + str(y)
                     if x[string] not in home:
-                        home.append(x[string])
+                        home.append(encodePlayer(x[string]))
                 for y in range(1, 6):
                     string = 'a' + str(y)
                     if x[string] not in away:
-                        away.append(x[string])
-    for x in home:
-        input.append(x)
-    for x in range(15 - len(home)):
-        input.append('div')
-    for x in away:
-        input.append(x)
-    for x in range(15 - len(away)):
-        input.append('div')
-    timesteps_sequence = []
-    timesteps_sequence.append('start')
-    for step in timesteps:
-        timesteps_sequence = timesteps_sequence + step
-    timesteps_sequence.append('end')
-    return (tensorin(input), tensorout(timesteps_sequence))
+                        away.append(encodePlayer(x[string]))
+                player_step.append(encodePlayer(subStep(x)[12]))
+                #print(str(count) + ': ' + 'SUB -', player_vocab[player_step[len(player_step) - 1]])
+    player_step.append(encodePlayer('end'))
+    return [tf.constant(playoff), tf.constant(season), tf.constant(home), tf.constant(away), tf.constant(player_step)]
 
 folderPath = r'C:\BallPredict'
-input_data = []
+input_season = []
+input_playoffs = []
+input_home = []
+input_away = []
 output_data = []
 count = 0
 for filename in os.listdir(folderPath):
     data = {}
     path = folderPath + '\\' + filename
     hold = parseGame(path)
-    input_data.append(hold[0])
-    output_data.append(hold[1])
+    #input_playoffs.append(hold[0])
+    #input_season.append(hold[1])
+    #input_home.append(hold[2])
+    #input_away.append(hold[3])
+    #output_data.append(hold[4])
     if count > 8:
         break
     count += 1
 
-# Vocabulary size and embedding dimension
+season_vocab.append(season_vocab[len(season_vocab) - 1] + 1)
+
+#input_season = np.array(input_season)
+#input_playoffs = np.array(input_playoffs)
+#input_home = np.array(input_home)
+#input_away = np.array(input_away)
+#output_data = np.array(output_data)
+
+season_input = Input(shape=(1,))
+playoff_input = Input(shape=(1,))
+home_input = Input(shape=(None,))
+away_input = Input(shape=(None,))
+output_input = Input(shape=(None,))
+
+playoff_embedding = Embedding(input_dim=2, output_dim=32)(playoff_input)
+season_embedding = Embedding(input_dim=len(season_vocab), output_dim=32)(season_input)
+roster_embedding_layer = Embedding(input_dim=len(player_vocab), output_dim=32)
+home_embedding = roster_embedding_layer(home_input)
+away_embedding = roster_embedding_layer(away_input)
+
+model = Model(inputs=[season_input, playoff_input, home_input, away_input], outputs=output_input)
+model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+model.fit([input_season, input_playoffs, input_home, input_away], output_data, epochs=10, batch_size=32)
+
+'''# Vocabulary size and embedding dimension
 input_vocab_size = len(input_vocab)+1
 output_vocab_size = len(output_vocab)+1
 embedding_dim = 128
@@ -480,7 +568,7 @@ decoder_embedding = tf.keras.layers.Embedding(output_vocab_size, embedding_dim, 
 decoder_rnn = tf.keras.layers.LSTM(hidden_units, return_sequences=True, return_state=True)
 decoder_outputs, _, _ = decoder_rnn(decoder_embedding, initial_state=encoder_states)
 
-#Attension mechanism
+#Attention mechanism
 attention = tf.keras.layers.Attention()([decoder_outputs, encoder_outputs])
 decoder_concat = tf.keras.layers.Concatenate(axis=-1)([decoder_outputs, attention])
 
@@ -496,29 +584,8 @@ print(model.summary())
 #Train the model
 padded_input = pad_sequences(input_data, maxlen=35, padding='post')
 padded_output = pad_sequences(output_data, maxlen=20000, padding='post')
-#model.fit([padded_input, padded_output], padded_output, batch_size=32, epochs=10)
+model.fit([padded_input, padded_output], padded_output, batch_size=32, epochs=10)
 
-#----------------------------Inference----------------------------
-#Encoder
-encoder_model = tf.keras.models.Model(encoder_inputs, encoder_states)
-
-#Decoder
-decoder_state_input_h = tf.keras.layers.Input(shape=(hidden_units,))
-decoder_state_input_c = tf.keras.layers.Input(shape=(hidden_units,))
-decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
-
-decoder_rnn_outputs, state_h, state_c = decoder_rnn(decoder_embedding, initial_state=decoder_states_inputs)
-decoder_states = [state_h, state_c]
-
-#Attention
-attention_inference = tf.keras.layers.Attention()([decoder_rnn_outputs, encoder_outputs])
-decoder_concat_inference = tf.keras.layers.Concatenate(axis=-1)([decoder_rnn_outputs, attention_inference])
-
-decoder_outputs = decoder_dense(decoder_concat_inference)
-
-decoder_states_outputs = [tf.keras.layers.Input(shape=(hidden_units,)) for _ in decoder_states_inputs]
-
-decoder_model = tf.keras.models.Model(
-    inputs=[decoder_inputs] + decoder_states_inputs,
-    outputs=[decoder_outputs] + decoder_states_outputs
-)
+path = r'C:\BallPredict\[2002-11-01]-0020200026-TOR@SAS.csv'
+with open(path):
+    model.predict(parseGame(path)[0])'''
